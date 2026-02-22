@@ -266,7 +266,6 @@ def configure_and_launch_vllm(model_idx, head_ip):
     env["VLLM_HOST_IP"] = head_ip
     env["NCCL_SOCKET_IFNAME"] = rdma_iface
     env["NCCL_IB_GID_INDEX"] = "1"
-    env["NCCL_IB_DISABLE"] = "0"
     env["NCCL_NET_GDR_LEVEL"] = "0"
     
     # Also need this for Ray backend?
@@ -297,7 +296,20 @@ def configure_and_launch_vllm(model_idx, head_ip):
     print(f" Config:    TP={current_tp} | Seqs={current_seqs} | Ctx={current_ctx}")
     if use_eager:
         print(" Note:      Eager Mode Enabled (Recommended for Cluster Stability)")
-    print(f" Command:   {' '.join(cmd)}")
+        
+    print("\n --- Environment Variables ---")
+    vars_to_print = [
+        "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+        "VLLM_HOST_IP",
+        "NCCL_SOCKET_IFNAME",
+        "NCCL_IB_GID_INDEX",
+        "NCCL_NET_GDR_LEVEL"
+    ]
+    for k in vars_to_print:
+        if k in env:
+            print(f" export {k}={env[k]}")
+            
+    print(f"\n Command:   {' '.join(cmd)}")
     print("="*60 + "\n")
     
     # Exec
@@ -335,21 +347,24 @@ def main():
         # Main Menu
         # 1. Configure IPs
         # 2. Start Cluster (Ray)
-        # 3. Start VLLM
-        # 4. Exit
+        # 3. Stop Ray Cluster
+        # 4. Ray Cluster Status
+        # 5. Launch VLLM Serve
+        # 6. Exit
         
         choice = run_dialog([
             "--clear", "--backtitle", "AMD VLLM RCCL Cluster Manager",
             "--title", "Main Menu",
-            "--menu", "Select Action:", "15", "60", "5",
+            "--menu", "Select Action:", "16", "60", "6",
             "1", f"Configure IPs (Head: {head_ip}, Worker: {worker_ip})",
             "2", "Start Ray Cluster",
-            "3", "Ray Cluster Status",
-            "4", "Launch VLLM Serve",
-            "5", "Exit"
+            "3", "Stop Ray Cluster",
+            "4", "Ray Cluster Status",
+            "5", "Launch VLLM Serve",
+            "6", "Exit"
         ])
         
-        if not choice or choice == "5":
+        if not choice or choice == "6":
             subprocess.run(["clear"])
             sys.exit(0)
             
@@ -359,25 +374,71 @@ def main():
                 head_ip, worker_ip = res
             
         elif choice == "2":
-            subprocess.run(["clear"])
-            print("= Starting Ray Cluster Setup =")
-            # 1. Start Head
-            if setup_head_node(head_ip):
-                print("Head node started successfully. Waiting 5s before worker connection...")
-                time.sleep(5)
-                # 2. Start Worker
-                if setup_worker_node(worker_ip, head_ip):
-                    # 3. Wait for full cluster
-                    wait_for_cluster()
-            input("Press Enter to continue...")
+            force_ethernet = False
+            enable_nccl_debug = False
+            
+            while True:
+                eth_status = "YES" if force_ethernet else "NO"
+                debug_status = "YES" if enable_nccl_debug else "NO"
+                
+                c_choice = run_dialog([
+                    "--clear", "--backtitle", "AMD VLLM RCCL Cluster Manager",
+                    "--title", "Cluster Network Configuration",
+                    "--menu", "Set Network Parameters before starting Ray:", "15", "65", "3",
+                    "1", f"Force Ethernet (Disable RDMA/RoCE):  {eth_status}",
+                    "2", f"Enable NCCL Debug Logging:           {debug_status}",
+                    "3", "START CLUSTER"
+                ])
+                if not c_choice: break
+                
+                if c_choice == "1":
+                    force_ethernet = not force_ethernet
+                elif c_choice == "2":
+                    enable_nccl_debug = not enable_nccl_debug
+                elif c_choice == "3":
+                    os.environ["NCCL_IB_DISABLE"] = "1" if force_ethernet else "0"
+                    if enable_nccl_debug:
+                        os.environ["NCCL_DEBUG"] = "INFO"
+                        os.environ["NCCL_DEBUG_SUBSYS"] = "INIT,NET"
+                    else:
+                        os.environ.pop("NCCL_DEBUG", None)
+                        os.environ.pop("NCCL_DEBUG_SUBSYS", None)
+                    
+                    subprocess.run(["clear"])
+                    print("= Starting Ray Cluster Setup =")
+                    # 1. Start Head
+                    if setup_head_node(head_ip):
+                        print("Head node started successfully. Waiting 5s before worker connection...")
+                        time.sleep(5)
+                        # 2. Start Worker
+                        if setup_worker_node(worker_ip, head_ip):
+                            # 3. Wait for full cluster
+                            wait_for_cluster()
+                    input("Press Enter to continue...")
+                    break
 
-        elif choice == "3":
-            subprocess.run(["clear"])
             print("= Ray Cluster Status =")
             subprocess.run(["ray", "status"])
             input("\nPress Enter to continue...")
             
+        elif choice == "3":
+            subprocess.run(["clear"])
+            print("= Stopping Ray Cluster =")
+            cluster_manager.stop_cluster(worker_ip)
+            input("\nPress Enter to continue...")
+            
         elif choice == "4":
+            subprocess.run(["clear"])
+            print("= Ray Cluster Status =")
+            res = subprocess.run(["ray", "status"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode != 0:
+                print("\n[!] Cluster is Offline or Unreachable.")
+                print("Please start the cluster first via Option 2 (Start Ray Cluster).")
+            else:
+                print(res.stdout)
+            input("\nPress Enter to continue...")
+            
+        elif choice == "5":
             # Select Model
             menu_items = []
             for i, m_id in enumerate(MODELS_TO_RUN):

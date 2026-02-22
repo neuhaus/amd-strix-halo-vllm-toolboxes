@@ -31,34 +31,76 @@ def get_subnet_from_ip(ip):
     parts = ip.split('.')
     return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
 
-def stop_cluster(nodes=None):
+def stop_cluster(worker_ip=None):
     """
-    Stops Ray on the given nodes (list of IPs). 
-    If nodes is None, does nothing (caller should identify nodes first if needed, 
-    but typically for a clean start we might just rely on 'ray stop' on each setup).
-    Actually, to be safe, we can try to stop local ray.
+    Stops Ray locally and on the worker node if provided.
     """
+    print("Stopping Ray cluster locally...")
     subprocess.run(["ray", "stop", "--force"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    if worker_ip:
+        print(f"Stopping Ray cluster on worker ({worker_ip})...")
+        ssh_cmd = [
+            "ssh", "-o", "StrictHostKeyChecking=no", worker_ip, 
+            "toolbox", "run", "-c", "vllm", "--", "ray", "stop", "--force"
+        ]
+        try:
+            subprocess.run(ssh_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Failed to stop worker node completely: {e}")
 
 def setup_worker_node(worker_ip, head_ip): 
     subnet = get_subnet_from_ip(worker_ip)
     
-    # Script to run on worker
+    # Read overrides from current env
+    nccl_disable_val = os.getenv("NCCL_IB_DISABLE", "0")
+    nccl_debug_val = os.getenv("NCCL_DEBUG", "")
+    
     script = f"""
     source /etc/profile
-    # Silece the kill command
+    # Silence the kill command
     ray stop --force > /dev/null 2>&1 || true
+    
+    # Calculate Interface dynamically
+    RDMA_IFACE=$(ip -o addr show to {subnet} | awk '{{print $2}}' | head -n1)
+    
+    echo "\\n--- Ray Worker Environment ({worker_ip}) ---"
+    echo "export RAY_DISABLE_METRICS=1"
+    echo "export RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1"
+    echo "export RAY_memory_monitor_refresh_ms=0"
+    echo "export VLLM_HOST_IP={worker_ip}"
+    echo "export RDMA_IFACE=$RDMA_IFACE"
+    echo "export NCCL_SOCKET_IFNAME=$RDMA_IFACE"
+    echo "export GLOO_SOCKET_IFNAME=$RDMA_IFACE"
+    echo "export NCCL_IB_TIMEOUT=23"
+    echo "export NCCL_IB_RETRY_CNT=7"
+    echo "export NCCL_IB_DISABLE={nccl_disable_val}"
+    
     export RAY_DISABLE_METRICS=1
     export RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
     export RAY_memory_monitor_refresh_ms=0
     export VLLM_HOST_IP={worker_ip}
-    export RDMA_IFACE=$(ip -o addr show to {subnet} | awk '{{print $2}}' | head -n1)
+    export RDMA_IFACE=$RDMA_IFACE
     export NCCL_SOCKET_IFNAME=$RDMA_IFACE
     export GLOO_SOCKET_IFNAME=$RDMA_IFACE
     # Stability for RDMA
     export NCCL_IB_TIMEOUT=23
     export NCCL_IB_RETRY_CNT=7
-    echo "Starting Ray Worker on {worker_ip} connecting to {head_ip}..."
+    export NCCL_IB_DISABLE={nccl_disable_val}
+    """
+    if nccl_debug_val:
+        script += f"""
+    echo "export NCCL_DEBUG={nccl_debug_val}"
+    echo "export NCCL_DEBUG_SUBSYS=INIT,NET"
+    export NCCL_DEBUG={nccl_debug_val}
+    export NCCL_DEBUG_SUBSYS=INIT,NET
+    """
+    
+    script += f"""
+    echo "\\nStarting Ray Worker on {worker_ip} connecting to {head_ip}..."
+    if [ "{nccl_disable_val}" = "1" ]; then
+        echo "Note: Worker is configured with NCCL_IB_DISABLE=1 (Ethernet Forced)"
+    fi
     ray start --address='{head_ip}:6379' --num-gpus=1 --num-cpus=8 --disable-usage-stats
     """
     
@@ -83,20 +125,55 @@ def setup_head_node(head_ip):
     
     print(f"Setting up Head Node ({head_ip})...")
     
+    # Read overrides from current env
+    nccl_disable_val = os.getenv("NCCL_IB_DISABLE", "0")
+    nccl_debug_val = os.getenv("NCCL_DEBUG", "")
+    
     script = f"""
     # Silence the kill command
     ray stop --force > /dev/null 2>&1 || true
+    
+    # Calculate Interface dynamically
+    RDMA_IFACE=$(ip -o addr show to {subnet} | awk '{{print $2}}' | head -n1)
+    
+    echo "\\n--- Ray Head Environment ({head_ip}) ---"
+    echo "export RAY_DISABLE_METRICS=1"
+    echo "export RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1"
+    echo "export RAY_memory_monitor_refresh_ms=0"
+    echo "export VLLM_HOST_IP={head_ip}"
+    echo "export RDMA_IFACE=$RDMA_IFACE"
+    echo "export NCCL_SOCKET_IFNAME=$RDMA_IFACE"
+    echo "export GLOO_SOCKET_IFNAME=$RDMA_IFACE"
+    echo "export NCCL_IB_TIMEOUT=23"
+    echo "export NCCL_IB_RETRY_CNT=7"
+    echo "export NCCL_IB_DISABLE={nccl_disable_val}"
+
     export RAY_DISABLE_METRICS=1
     export RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
     export RAY_memory_monitor_refresh_ms=0
     export VLLM_HOST_IP={head_ip}
-    export RDMA_IFACE=$(ip -o addr show to {subnet} | awk '{{print $2}}' | head -n1)
+    export RDMA_IFACE=$RDMA_IFACE
     export NCCL_SOCKET_IFNAME=$RDMA_IFACE
     export GLOO_SOCKET_IFNAME=$RDMA_IFACE
     # Stability for RDMA
     export NCCL_IB_TIMEOUT=23
     export NCCL_IB_RETRY_CNT=7
-    echo "Starting Ray Head on {head_ip}..."
+    export NCCL_IB_DISABLE={nccl_disable_val}
+    """
+    
+    if nccl_debug_val:
+        script += f"""
+    echo "export NCCL_DEBUG={nccl_debug_val}"
+    echo "export NCCL_DEBUG_SUBSYS=INIT,NET"
+    export NCCL_DEBUG={nccl_debug_val}
+    export NCCL_DEBUG_SUBSYS=INIT,NET
+    """
+    
+    script += f"""
+    echo "\\nStarting Ray Head on {head_ip}..."
+    if [ "{nccl_disable_val}" = "1" ]; then
+        echo "Note: Head is configured with NCCL_IB_DISABLE=1 (Ethernet Forced)"
+    fi
     ray start --head --port=6379 --node-ip-address={head_ip} --num-gpus=1 --num-cpus=8 --disable-usage-stats --include-dashboard=false
     """
     

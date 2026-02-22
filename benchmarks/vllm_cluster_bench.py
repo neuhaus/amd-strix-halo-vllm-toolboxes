@@ -23,6 +23,8 @@ except ImportError:
 # User requested specifically to test with TP=2 on the cluster.
 CLUSTER_TP = 2
 GPU_UTIL = "0.90" 
+FORCE_ETH = False
+FORCE_DEBUG_NCCL = False
 
 # THROUGHPUT CONFIG (Imported from models.py)
 OFF_NUM_PROMPTS      = models.OFF_NUM_PROMPTS
@@ -66,6 +68,15 @@ def log(msg): print(f"\n[CLUSTER-BENCH] {msg}")
 def restart_cluster():
     log("Restarting Ray Cluster (Clean State)...")
     
+    # Push config to env so cluster_manager picks it up for daemon injection
+    os.environ["NCCL_IB_DISABLE"] = "1" if FORCE_ETH else "0"
+    if FORCE_DEBUG_NCCL:
+        os.environ["NCCL_DEBUG"] = "INFO"
+        os.environ["NCCL_DEBUG_SUBSYS"] = "INIT,NET"
+    else:
+        os.environ.pop("NCCL_DEBUG", None)
+        os.environ.pop("NCCL_DEBUG_SUBSYS", None)
+        
     # 1. Stop Cluster (Best Effort)
     cluster_manager.stop_cluster()
     
@@ -130,12 +141,16 @@ def get_cluster_env():
     env["GLOO_SOCKET_IFNAME"] = rdma_iface
     # RCCL specific
     env["NCCL_IB_GID_INDEX"] = "1"
-    env["NCCL_IB_DISABLE"] = "0"
+    env["NCCL_IB_DISABLE"] = "1" if FORCE_ETH else "0"
     env["NCCL_NET_GDR_LEVEL"] = "0"
     
     # Stability for RDMA (Fix for high-throughput models like Gemma 3)
     env["NCCL_IB_TIMEOUT"] = "23"  # ~32 seconds (default is 18/~1s)
     env["NCCL_IB_RETRY_CNT"] = "7" # Default is 3, increase for lossy networks
+    
+    if FORCE_DEBUG_NCCL:
+        env["NCCL_DEBUG"] = "INFO"
+        env["NCCL_DEBUG_SUBSYS"] = "INIT,NET"
     
     return env
 
@@ -166,7 +181,8 @@ def get_model_args(model):
 def get_benchmark_output_file(model, output_dir):
     model_safe = model.replace("/", "_")
     output_dir_path = Path(output_dir)
-    return output_dir_path / f"{model_safe}_cluster_tp{CLUSTER_TP}_throughput.json"
+    eth_suffix = "_eth" if FORCE_ETH else ""
+    return output_dir_path / f"{model_safe}_cluster_tp{CLUSTER_TP}{eth_suffix}_throughput.json"
 
 def run_bench_set(model, backend_name, output_dir, extra_env=None):
     output_dir_path = Path(output_dir)
@@ -244,7 +260,9 @@ def run_cluster_throughput(model):
 
 
 def print_summary():
-    print(f"\n{'MODEL (TP=2)':<50} | {'Triton':<8} | {'ROCm':<8}")
+    eth_suffix = "_eth" if FORCE_ETH else ""
+    title_suffix = " (Ethernet ONLY)" if FORCE_ETH else ""
+    print(f"\n{f'MODEL (TP=2){title_suffix}':<50} | {'Triton':<8} | {'ROCm':<8}")
     print("-" * 75)
     
     for m in MODELS_TO_RUN:
@@ -252,14 +270,14 @@ def print_summary():
         
         # Default
         try: 
-            p1 = RESULTS_DIR / f"{msafe}_cluster_tp{CLUSTER_TP}_throughput.json"
+            p1 = RESULTS_DIR / f"{msafe}_cluster_tp{CLUSTER_TP}{eth_suffix}_throughput.json"
             d1 = json.loads(p1.read_text())
             val1 = f"{d1.get('tokens_per_second', 0):.1f}"
         except: val1 = "N/A"
         
         # ROCm
         try:
-            p2 = Path("benchmark_results_rocm") / f"{msafe}_cluster_tp{CLUSTER_TP}_throughput.json"
+            p2 = Path("benchmark_results_rocm") / f"{msafe}_cluster_tp{CLUSTER_TP}{eth_suffix}_throughput.json"
             d2 = json.loads(p2.read_text())
             val2 = f"{d2.get('tokens_per_second', 0):.1f}"
         except: val2 = "N/A"
@@ -269,14 +287,19 @@ def print_summary():
     print("-" * 75)
 
 if __name__ == "__main__":
-    # if not check_ray_status():
-    #     log("ERROR: Ray Cluster not ready. Please start it with 'start-vllm-cluster' first.")
-    #     sys.exit(1)
-    # We now handle this by restarting the cluster ourselves.
-    pass
+    parser = argparse.ArgumentParser(description="VLLM Cluster Benchmark")
+    parser.add_argument("--eth-only", action="store_true", help="Run benchmark using only Ethernet (disable RDMA/RoCE)")
+    parser.add_argument("--debug-nccl", action="store_true", help="Enable NCCL Debug logging (INFO level for Transport tracking)")
+    args = parser.parse_args()
+    
+    FORCE_ETH = args.eth_only
+    FORCE_DEBUG_NCCL = args.debug_nccl
 
-        
     log("Ray Cluster Detected. Starting Benchmarks (Dual Backend)...")
+    if FORCE_ETH:
+        log("Note: Ethernet ONLY mode enabled. RDMA/RoCE disabled.")
+    if FORCE_DEBUG_NCCL:
+        log("Note: NCCL Debug mode enabled (Transport Logging).")
     log("Note: Eager Mode (--enforce-eager) is ENABLED for cluster stability.")
     
     for m in MODELS_TO_RUN:
