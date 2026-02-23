@@ -15,18 +15,21 @@ except ImportError:
     print("Error: 'transformers' not found. Please install it or run in vLLM environment.")
     sys.exit(1)
 
+
 # Import path handling for scripts/models.py
 try:
     import sys, os
     sys.path.append(str(Path(__file__).parent.parent / "scripts"))
     import models
+    import cluster_manager # Import shared cluster logic
 except ImportError:
-    print("Error: Could not import scripts/models.py.")
+    print("Error: Could not import scripts/models.py or cluster_manager.py.")
     sys.exit(1)
 
 # Import Utils from run_vllm_bench (keep utils shared)
 try:
-    from run_vllm_bench import get_gpu_count, kill_vllm
+    from run_vllm_bench import kill_vllm
+    # We do NOT import get_gpu_count because we are overriding it for cluster awareness
 except ImportError:
     print("Error: Could not import run_vllm_bench.py.")
     sys.exit(1)
@@ -65,7 +68,30 @@ CONCURRENCY_STEPS = [1, 4, 8, 16]
 
 def log(msg):    print(f"[MAX-CTX] {msg}", flush=True)
 
+def get_gpu_count():
+    """
+    Returns total GPUs. 
+    If Ray Cluster is active, returns TOTAL cluster GPUs (e.g., 2).
+    Otherwise returns local AMD GPUs.
+    """
+    if cluster_manager.check_ray_status():
+        # Ideally we'd query Ray for total resources, but for this specific 2-node setup:
+        # If cluster is up, we assume 2 nodes x 1 GPU = 2 GPUs.
+        # Constructing a Ray client just to count is slow/complex here.
+        log("Ray Cluster Detected: Assuming 2 GPUs available.")
+        return 2
+        
+    # Local Fallback
+    try:
+        res = subprocess.run("rocm-smi --showid", shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode == 0:
+            return res.stdout.count("GPU")
+    except: pass
+    return 1
+
+
 def get_hf_context_limit(model_name, trust_remote=False):
+    # ... (Keep existing implementation)
     try:
         cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=trust_remote)
 
@@ -95,6 +121,7 @@ def get_hf_context_limit(model_name, trust_remote=False):
 def get_vllm_server_cmd(model, tp_size, util, max_len, max_seqs):
     """
     Constructs the vLLM serve command.
+    Using Ray Backend if tp_size > 1 (Cluster Mode).
     """
     config = MODEL_TABLE[model]
     
@@ -105,15 +132,45 @@ def get_vllm_server_cmd(model, tp_size, util, max_len, max_seqs):
         "--tensor-parallel-size", str(tp_size),
         "--max-num-seqs", str(max_seqs),
         "--dtype", "auto",
-        # "--disable-log-stats" # Cleaner output, but user managed without it
+        # "--disable-log-stats" 
     ]
     
-    if config.get("trust_remote"): cmd.append("--trust-remote-code")
-    if config.get("enforce_eager"): cmd.append("--enforce-eager")
-    
-    # Add model specific env vars
+    # Env Setup
     env = os.environ.copy()
     env.update(config.get("env", {}))
+
+    # CLUSTER / RAY LOGIC
+    # Only if we need more than 1 GPU do we engage the cluster machinery
+    if tp_size > 1:
+        log(f"TP={tp_size} > 1: Using Ray Distributed Backend")
+        cmd.extend(["--distributed-executor-backend", "ray"])
+        
+        # Inject Cluster Env Vars (similar to start_vllm_cluster.py)
+        # We need to know Head IP and RDMA Interface
+        rdma_iface = cluster_manager.get_net_iface()
+        head_ip = cluster_manager.get_local_ip(rdma_iface) # Assuming we run this ON HEAD
+        
+        # IMPORTANT: vLLM needs to bind to the Head IP for Ray workers to reach it? 
+        # Or at least we should be explicit.
+        cmd.extend(["--host", head_ip])
+        
+        # Update our own process env so verify_context knows where to look?
+        # No, verify_context runs in THIS process. We need to export it or pass it.
+        # Simplest is to set it in os.environ for OUR process too, but that might be messy.
+        # Better: We rely on standard PORT.
+        
+        env["RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES"] = "1"
+        env["VLLM_HOST_IP"] = head_ip
+        env["NCCL_SOCKET_IFNAME"] = rdma_iface
+        env["NCCL_IB_GID_INDEX"] = "1"
+        env["NCCL_IB_DISABLE"] = "0"
+        env["NCCL_NET_GDR_LEVEL"] = "0"
+    else:
+        # Default Localhost bind for single node safety
+        cmd.extend(["--host", "127.0.0.1"])
+        
+    if config.get("trust_remote"): cmd.append("--trust-remote-code")
+    if config.get("enforce_eager"): cmd.append("--enforce-eager")
     
     return cmd, env
 
@@ -300,7 +357,14 @@ def verify_context(model, context_len):
     """
     Sends a request to the server with length ~context_len to verify stability.
     """
-    url = f"http://{HOST}:{PORT}/v1/completions"
+    # Use dynamic host if set (by cluster logic), else localhost
+    # But wait, the env var is set for the SERVER process, not necessarily us?
+    # Actually, we (the client script) need to know where to send requests.
+    # If we are on Head, localhost is fine for Head-based server. 
+    # But if we use Ray, vLLM head usually binds to HOST IP.
+    
+    target_host = os.getenv("VLLM_HOST_IP", "127.0.0.1")
+    url = f"http://{target_host}:{PORT}/v1/completions"
     
     # We use a simple "A " * N prompt.
     # Llama 3 tokenizer: "A" is usually 1 token.
@@ -529,9 +593,22 @@ def main():
             continue
             
         config = MODEL_TABLE[model]
-        valid_tps = [t for t in config["valid_tp"] if t <= gpu_count]
         
-        for tp in valid_tps:
+        # KEY CHANGES:
+        # We only want to test the MINIMUM required TP.
+        # If model supports 1 and 2, we ONLY test 1 (local is faster/easier).
+        # We only test 2 if model VALID_TP *starts* with 2 (or higher).
+        
+        valid_tps = config.get("valid_tp", [1])
+        min_tp = min(valid_tps)
+        
+        if min_tp > gpu_count:
+            log(f"Skipping {model}: Requires TP={min_tp} but only {gpu_count} GPUs available.")
+            continue
+            
+        tps_to_test = [min_tp]
+        
+        for tp in tps_to_test:
             # Track successful seqs for this TP to skip lower utils
             # effectively: {seqs_count: max_working_util}
             # Since we iterate high-util -> low-util, if we succeeded already for this 'seqs', we skip.

@@ -66,6 +66,11 @@ def parse_logs():
             if not tp_match: continue
             tp = int(tp_match.group(1))
             
+            # Network
+            network = "RoCE"
+            if "_eth" in rest:
+                network = "Ethernet"
+            
             # Model Name
             if "_" in model_part:
                 model_display = model_part.replace("_", "/", 1)
@@ -87,6 +92,7 @@ def parse_logs():
                 "params_b": params_b,
                 "name_params_b": params_b,
                 "backend": backend_name, # "Triton" or "ROCm"
+                "network": network,
                 "error": False
             }
 

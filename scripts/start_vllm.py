@@ -36,6 +36,22 @@ else:
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = os.getenv("PORT", "8000")
 
+def detect_gpus():
+    """Detects AMD GPUs via rocm-smi or /dev/dri."""
+    try:
+        # Try rocm-smi first
+        res = subprocess.run(["rocm-smi", "--showid", "--csv"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0:
+            count = res.stdout.count("GPU")
+            if count > 0: return count
+    except: pass
+    
+    # Fallback to /dev/dri/render*
+    try:
+        return len(list(Path("/dev/dri").glob("renderD*")))
+    except:
+        return 1
+
 def get_discovered_models():
     """
     Overrides the hardcoded MODELS_TO_RUN by looking at what we actually have results for.
@@ -92,22 +108,6 @@ def check_dependencies():
     if not shutil.which("dialog"):
         print("Error: 'dialog' is required. Please install it (apt-get install dialog).")
         sys.exit(1)
-
-def detect_gpus():
-    """Detects AMD GPUs via rocm-smi or /dev/dri."""
-    try:
-        # Try rocm-smi first
-        res = subprocess.run(["rocm-smi", "--showid", "--csv"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if res.returncode == 0:
-            count = res.stdout.count("GPU")
-            if count > 0: return count
-    except: pass
-    
-    # Fallback to /dev/dri/render*
-    try:
-        return len(list(Path("/dev/dri").glob("renderD*")))
-    except:
-        return 1
 
 def get_verified_config(model_id, tp_size, max_seqs):
     """
@@ -334,7 +334,15 @@ def configure_and_launch(model_idx, gpu_count):
     print(f" Backend:   {'ROCm' if use_rocm_attn else 'Triton'}")
     if clear_cache:
         print(f" Action:    Clearing vLLM Cache (~/.cache/vllm)")
-    print(f" Command:   {' '.join(cmd)}")
+        
+    # Variables that represent the custom environment overrides for models
+    custom_env = config.get("env", {})
+    if custom_env:
+        print("\n --- Environment Variables ---")
+        for k, v in custom_env.items():
+            print(f" export {k}={v}")
+            
+    print(f"\n Command:   {' '.join(cmd)}")
     print("="*60 + "\n")
     
     os.execvpe("vllm", cmd, env)

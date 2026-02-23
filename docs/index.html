@@ -469,6 +469,10 @@
                     style="font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 4px; cursor: pointer;">
                     <input type="checkbox" id="toggleTP2" checked> TP2
                 </label>
+                <label
+                    style="font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                    <input type="checkbox" id="toggleTP2Eth" checked> TP2 (Eth)
+                </label>
             </div>
 
             <!-- Attention Group -->
@@ -544,6 +548,7 @@
             activeTab: "Throughput",
             showTP1: true,
             showTP2: true,
+            showTP2Eth: true,
             showTriton: true,
             showRocm: false
         };
@@ -615,6 +620,7 @@
             // Toggles
             $('toggleTP1').addEventListener('change', e => { state.showTP1 = e.target.checked; render(); });
             $('toggleTP2').addEventListener('change', e => { state.showTP2 = e.target.checked; render(); });
+            $('toggleTP2Eth').addEventListener('change', e => { state.showTP2Eth = e.target.checked; render(); });
             $('toggleTriton').addEventListener('change', e => { state.showTriton = e.target.checked; render(); });
             $('toggleRocm').addEventListener('change', e => { state.showRocm = e.target.checked; render(); });
         }
@@ -636,13 +642,17 @@
                         params: run.params_b || run.name_params_b,
                         results: {
                             1: { triton: null, rocm: null },
-                            2: { triton: null, rocm: null }
+                            2: { triton: null, rocm: null },
+                            "2_eth": { triton: null, rocm: null }
                         }
                     };
                 }
 
                 const m = testGroups[testName].models[modelName];
-                const tp = run.tp || 1;
+                let tp = run.tp || 1;
+                if (tp === 2 && run.network === "Ethernet") {
+                    tp = "2_eth";
+                }
 
                 if (!m.results[tp]) m.results[tp] = { triton: null, rocm: null };
 
@@ -749,8 +759,12 @@
                 if (state.showRocm) cols.push({ id: "tp1_rocm", label: "TP1 ROCm" });
             }
             if (state.showTP2) {
-                if (state.showTriton) cols.push({ id: "tp2_triton", label: "TP2 Triton" });
-                if (state.showRocm) cols.push({ id: "tp2_rocm", label: "TP2 ROCm" });
+                if (state.showTriton) cols.push({ id: "tp2_triton", label: "TP2 RoCE Triton" });
+                if (state.showRocm) cols.push({ id: "tp2_rocm", label: "TP2 RoCE ROCm" });
+            }
+            if (state.showTP2Eth) {
+                if (state.showTriton) cols.push({ id: "tp2_eth_triton", label: "TP2 Eth Triton" });
+                if (state.showRocm) cols.push({ id: "tp2_eth_rocm", label: "TP2 Eth ROCm" });
             }
 
             // Thead
@@ -790,11 +804,7 @@
 
                 // Data Cells
                 cols.forEach(c => {
-                    let val = null;
-                    if (c.id === "tp1_triton") val = m.results[1]?.triton;
-                    if (c.id === "tp1_rocm") val = m.results[1]?.rocm;
-                    if (c.id === "tp2_triton") val = m.results[2]?.triton;
-                    if (c.id === "tp2_rocm") val = m.results[2]?.rocm;
+                    let val = getVal(m, c.id);
 
                     const bg = c.id.startsWith("tp2") ? 'style="background:#fbfdff;"' : "";
                     rowHtml += `<td class="col-data" ${bg}>${formatVal(val, unit)}</td>`;
@@ -823,6 +833,8 @@
             if (colId === "tp1_rocm") return m.results[1]?.rocm;
             if (colId === "tp2_triton") return m.results[2]?.triton;
             if (colId === "tp2_rocm") return m.results[2]?.rocm;
+            if (colId === "tp2_eth_triton") return m.results["2_eth"]?.triton;
+            if (colId === "tp2_eth_rocm") return m.results["2_eth"]?.rocm;
             return null;
         }
 
