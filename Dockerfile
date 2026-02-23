@@ -66,6 +66,14 @@ RUN echo "import sys, re" > patch_strix.py && \
   echo "txt = re.sub(r'device_name = .*', 'device_name = \"gfx1151\"', txt)" >> patch_strix.py && \
   echo "txt += '\n    def get_device_name(self, device_id: int = 0) -> str:\n        return \"AMD-gfx1151\"\n'" >> patch_strix.py && \
   echo "p.write_text(txt)" >> patch_strix.py && \
+  # Patch 3: Fix C10_HIP_CHECK undeclared identifier in selective_scan_fwd.hip
+  echo "p_hip = Path('csrc/mamba/mamba_ssm/selective_scan_fwd.hip')" >> patch_strix.py && \
+  echo "if p_hip.exists():" >> patch_strix.py && \
+  echo "    txt_hip = p_hip.read_text()" >> patch_strix.py && \
+  echo "    macro_def = '#ifndef C10_HIP_CHECK\n#include <c10/hip/HIPException.h>\n#ifndef C10_HIP_CHECK\n#define C10_HIP_CHECK(error) if (error != hipSuccess) { abort(); }\n#endif\n#endif\n'" >> patch_strix.py && \
+  echo "    txt_hip = macro_def + txt_hip" >> patch_strix.py && \
+  echo "    p_hip.write_text(txt_hip)" >> patch_strix.py && \
+  # -----------
   echo "print('Successfully patched vLLM for Strix Halo')" >> patch_strix.py && \
   python patch_strix.py && \
   sed -i 's/gfx1200;gfx1201/gfx1151/' CMakeLists.txt  
