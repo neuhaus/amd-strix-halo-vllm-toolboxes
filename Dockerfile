@@ -112,6 +112,7 @@ COPY scripts/cluster_manager.py /opt/cluster_manager.py
 COPY scripts/models.py /opt/models.py
 
 COPY benchmarks/max_context_results.json /opt/max_context_results.json
+COPY benchmarks/bench_utils.py /opt/bench_utils.py
 COPY benchmarks/run_vllm_bench.py /opt/run_vllm_bench.py
 COPY benchmarks/vllm_cluster_bench.py /opt/vllm_cluster_bench.py
 COPY benchmarks/find_max_context.py /opt/find_max_context.py

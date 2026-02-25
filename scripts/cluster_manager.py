@@ -2,13 +2,17 @@ import subprocess
 import time
 import os
 
-def get_net_iface(ip_prefix="192.168.100"):
+def get_net_iface(ip_prefix=None):
     """
     Auto-detects the interface that serves the cluster network.
-    Assumes standard 192.168.100.x setup from start_vllm_cluster.py
+    Assumes standard 192.168.100.x setup from start_vllm_cluster.py, but parameterizable.
     """
+    if ip_prefix is None:
+        head_ip = os.getenv("VLLM_HEAD_IP", "192.168.100.1")
+        ip_prefix = ".".join(head_ip.split('.')[:3])
+        
     try:
-        # ip -o addr show | grep 192.168.100
+        # ip -o addr show | grep <ip_prefix>
         cmd = f"ip -o addr show | grep {ip_prefix}"
         res = subprocess.check_output(cmd, shell=True, text=True).strip()
         # Output format: 2: eth0    inet 192.168.100.1/24 ...

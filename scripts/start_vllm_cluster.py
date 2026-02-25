@@ -96,12 +96,13 @@ def check_ray_status():
 def wait_for_cluster():
     return cluster_manager.wait_for_cluster()
 
-def nuke_vllm_cache():
+def nuke_vllm_cache(head_ip):
     # Only nukes local cache on the head node for now, or use cluster nuke?
     # The original script just did local nuke.
     # cluster_manager has nuke_vllm_cache_on_node and nuke_vllm_cache_cluster
     # Let's use the local ip one effectively
-    rdma = cluster_manager.get_net_iface()
+    prefix = ".".join(head_ip.split('.')[:3])
+    rdma = cluster_manager.get_net_iface(prefix)
     local = cluster_manager.get_local_ip(rdma)
     cluster_manager.nuke_vllm_cache_on_node(local, is_local=True)
 
@@ -244,7 +245,7 @@ def configure_and_launch_vllm(model_idx, head_ip):
     subprocess.run(["clear"])
     
     if clear_cache:
-        nuke_vllm_cache()
+        nuke_vllm_cache(head_ip)
     
     # Environment Setup
     # We need to set these variables in the current process before exec or pass them in env
@@ -340,8 +341,8 @@ def main():
     check_dependencies()
     
     # Default IPs
-    head_ip = "192.168.100.1"
-    worker_ip = "192.168.100.2"
+    head_ip = os.getenv("VLLM_HEAD_IP", "192.168.100.1")
+    worker_ip = os.getenv("VLLM_WORKER_IP", "192.168.100.2")
     
     while True:
         # Main Menu

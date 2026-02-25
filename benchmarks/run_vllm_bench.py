@@ -2,6 +2,12 @@
 import subprocess, time, json, sys, os, requests, argparse
 from pathlib import Path
 
+try:
+    import bench_utils
+except ImportError:
+    sys.path.append(str(Path(__file__).parent))
+    import bench_utils
+
 
 # =========================
 # ⚙️ GLOBAL SETTINGS
@@ -89,38 +95,43 @@ def get_dataset():
 
 
 
-def get_model_args(model, tp_size):
+def get_model_args(model, tp_size, overrides=None):
     config = MODEL_TABLE.get(model, {"max_num_seqs": "32"})
+    overrides = overrides or {}
     
     # Allow per-model GPU utilization override
-    util = config.get("gpu_util", GPU_UTIL)
+    util = overrides.get("gpu_util", config.get("gpu_util", GPU_UTIL))
+    max_seq_override = overrides.get("max_num_seqs", config.get("max_num_seqs", "32"))
 
     cmd = [
         "--model", model,
-        "--gpu-memory-utilization", util,
+        "--gpu-memory-utilization", str(util),
         "--dtype", "auto",
         "--tensor-parallel-size", str(tp_size),
-        "--max-num-seqs", config["max_num_seqs"]
+        "--max-num-seqs", str(max_seq_override)
     ]
     
     # Optional: if a model really needs a hard limit, we can still support "ctx" in config,
     # but by default we rely on auto.
-    if "ctx" in config:
-        cmd.extend(["--max-model-len", config["ctx"]])
+    if "ctx" in overrides or "ctx" in config:
+        cmd.extend(["--max-model-len", str(overrides.get("ctx", config.get("ctx")))])
         
     if config.get("trust_remote"): cmd.append("--trust-remote-code")
     if config.get("enforce_eager"): cmd.append("--enforce-eager")
     
     return cmd
 
-def run_throughput(model, tp_size, backend_name="Default", output_dir=RESULTS_DIR, extra_env=None):
+def run_throughput(model, tp_size, backend_name="Default", output_dir=RESULTS_DIR, extra_env=None, overrides=None):
     if tp_size not in MODEL_TABLE[model]["valid_tp"]: return
+    overrides = overrides or {}
     
     model_safe = model.replace("/", "_")
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
     
-    output_file = output_dir_path / f"{model_safe}_tp{tp_size}_throughput.json"
+    tag = overrides.get("tag", "").strip()
+    tag_suffix = f"_{tag}" if tag else ""
+    output_file = output_dir_path / f"{model_safe}_tp{tp_size}{tag_suffix}_throughput.json"
     
     if output_file.exists():
         log(f"SKIP {model} (TP={tp_size} | {backend_name})")
@@ -130,13 +141,13 @@ def run_throughput(model, tp_size, backend_name="Default", output_dir=RESULTS_DI
     dataset_args = ["--dataset-name", "sharegpt", "--dataset-path", dataset_path] if dataset_path else ["--input-len", "1024"]
     
     # Retrieve Model-Specific Batch Tokens
-    batch_tokens = MODEL_TABLE[model].get("max_tokens", DEFAULT_BATCH_TOKENS)
+    batch_tokens = str(overrides.get("max_tokens", MODEL_TABLE[model].get("max_tokens", DEFAULT_BATCH_TOKENS)))
 
     log(f"START {model} (TP={tp_size} | {backend_name}) [Batch: {batch_tokens}]...")
     kill_vllm()
     nuke_vllm_cache()
 
-    cmd = ["vllm", "bench", "throughput"] + get_model_args(model, tp_size)
+    cmd = ["vllm", "bench", "throughput"] + get_model_args(model, tp_size, overrides)
     cmd.extend([
         "--num-prompts", str(OFF_NUM_PROMPTS),
         "--max-num-batched-tokens", batch_tokens,
@@ -197,6 +208,7 @@ def print_summary(tps):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tp", type=int, nargs="+", default=[1])
+    parser.add_argument("--tui", action="store_true", help="Launch interactive configuration UI")
     args = parser.parse_args()
     
     gpu_count = get_gpu_count()
@@ -207,17 +219,86 @@ if __name__ == "__main__":
         log(f"Requested TP={args.tp} but only {gpu_count} GPU(s) detected. Nothing to run.")
         sys.exit(0)
 
+    selected_models = MODELS_TO_RUN
+    
+    if args.tui:
+        # TUI Model Selection
+        checklist_args = [
+            "--clear", "--backtitle", "AMD vLLM Benchmark Launcher",
+            "--title", "Model Selection",
+            "--checklist", "Select models to benchmark:", "20", "65", "10"
+        ]
+        
+        for m in MODELS_TO_RUN:
+            m_name = m.split("/")[-1]
+            # All selected "on" by default
+            checklist_args.extend([m, m_name, "on"])
+            
+        choice = bench_utils.run_dialog(checklist_args)
+        
+        if choice is None:
+            subprocess.run(["clear"])
+            print("Cancelled by user.")
+            sys.exit(0)
+            
+        # Parse space-separated quoted output from dialog checklist
+        import shlex
+        selected_models = [m for m in shlex.split(choice)]
+        
+        if not selected_models:
+            subprocess.run(["clear"])
+            print("No models selected. Exiting.")
+            sys.exit(0)
+
     kill_vllm()
     for tp in valid_tp_args:
-        for m in MODELS_TO_RUN:
+        for m in selected_models:
+            overrides = {}
+            if args.tui:
+                config = MODEL_TABLE.get(m, {})
+                default_seqs = config.get("max_num_seqs", "32")
+                default_tokens = config.get("max_tokens", DEFAULT_BATCH_TOKENS)
+                default_util = config.get("gpu_util", GPU_UTIL)
+                default_ctx = config.get("ctx", "auto")
+                
+                form_args = [
+                    "--clear", "--backtitle", f"AMD vLLM Benchmark Configuration (TP: {tp})",
+                    "--title", f"Tune Parameters: {m.split('/')[-1]}",
+                    "--form", "Edit the options below. Leave tag empty for no suffix.",
+                    "15", "70", "5",
+                    "Max Concurrent Seqs:", "1", "1",  str(default_seqs), "1", "25", "15", "0",
+                    "Max Batched Tokens:", "2", "1", str(default_tokens), "2", "25", "15", "0",
+                    "GPU Utilization (0-1):", "3", "1", str(default_util), "3", "25", "15", "0",
+                    "Max Context Length:", "4", "1", str(default_ctx), "4", "25", "15", "0",
+                    "Filename Tag (Optional):", "5", "1", "", "5", "25", "15", "0"
+                ]
+                
+                form_res = bench_utils.run_dialog(form_args)
+                if form_res is None:
+                    subprocess.run(["clear"])
+                    print(f"Skipping {m} (TP={tp}) due to user cancellation.")
+                    continue
+                    
+                lines = form_res.splitlines()
+                if len(lines) >= 5:
+                    overrides["max_num_seqs"] = lines[0].strip()
+                    overrides["max_tokens"] = lines[1].strip()
+                    overrides["gpu_util"] = lines[2].strip()
+                    
+                    ctx_val = lines[3].strip()
+                    if ctx_val and ctx_val.lower() != "auto":
+                        overrides["ctx"] = ctx_val
+                        
+                    overrides["tag"] = lines[4].strip()
+            
             # 1. Default (Triton)
-            run_throughput(m, tp, "Default", RESULTS_DIR)
+            run_throughput(m, tp, "Default", RESULTS_DIR, overrides=overrides)
             
             # 2. ROCm Attention 
             # We force this via CLI argument --attention-backend ROCM_ATTN below
             # No specific env vars needed if forcing backend.
             rocm_env = {}
             print(f"[DEBUG] Forcing ROCm Env: {rocm_env} + CLI: --attention-backend ROCM_ATTN")
-            run_throughput(m, tp, "ROCm-Attn", "benchmark_results_rocm", rocm_env)
+            run_throughput(m, tp, "ROCm-Attn", "benchmark_results_rocm", rocm_env, overrides=overrides)
             
     print_summary(valid_tp_args)

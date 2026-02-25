@@ -2,6 +2,12 @@
 import subprocess, time, json, sys, os, requests, argparse, re
 from pathlib import Path
 
+try:
+    import bench_utils
+except ImportError:
+    sys.path.append(str(Path(__file__).parent))
+    import bench_utils
+
 # Import models immediately to access globals
 try:
     import models
@@ -100,7 +106,8 @@ def restart_cluster():
     log("Cluster Ready.")
 
 def get_net_iface():
-    return cluster_manager.get_net_iface()
+    prefix = ".".join(HEAD_IP.split('.')[:3])
+    return cluster_manager.get_net_iface(prefix)
 
 def get_local_ip(iface):
     return cluster_manager.get_local_ip(iface)
@@ -154,22 +161,24 @@ def get_cluster_env():
     
     return env
 
-def get_model_args(model):
+def get_model_args(model, overrides=None):
     config = MODEL_TABLE.get(model, {"max_num_seqs": "32"})
-    util = config.get("gpu_util", GPU_UTIL)
+    overrides = overrides or {}
+    util = overrides.get("gpu_util", config.get("gpu_util", GPU_UTIL))
+    max_seq_override = overrides.get("max_num_seqs", config.get("max_num_seqs", "32"))
 
     cmd = [
         "--model", model,
-        "--gpu-memory-utilization", util,
+        "--gpu-memory-utilization", str(util),
         "--dtype", "auto",
         "--tensor-parallel-size", str(CLUSTER_TP),
-        "--max-num-seqs", config["max_num_seqs"],
+        "--max-num-seqs", str(max_seq_override),
         "--distributed-executor-backend", "ray"
     ]
     
     # Optional ctx
-    if "ctx" in config:
-        cmd.extend(["--max-model-len", config["ctx"]])
+    if "ctx" in overrides or "ctx" in config:
+        cmd.extend(["--max-model-len", str(overrides.get("ctx", config.get("ctx")))])
         
     if config.get("trust_remote"): cmd.append("--trust-remote-code")
     
@@ -178,17 +187,20 @@ def get_model_args(model):
     
     return cmd
 
-def get_benchmark_output_file(model, output_dir):
+def get_benchmark_output_file(model, output_dir, tag=""):
     model_safe = model.replace("/", "_")
     output_dir_path = Path(output_dir)
     eth_suffix = "_eth" if FORCE_ETH else ""
-    return output_dir_path / f"{model_safe}_cluster_tp{CLUSTER_TP}{eth_suffix}_throughput.json"
+    tag_suffix = f"_{tag}" if tag else ""
+    return output_dir_path / f"{model_safe}_cluster_tp{CLUSTER_TP}{eth_suffix}{tag_suffix}_throughput.json"
 
-def run_bench_set(model, backend_name, output_dir, extra_env=None):
+def run_bench_set(model, backend_name, output_dir, extra_env=None, overrides=None):
     output_dir_path = Path(output_dir)
     output_dir_path.mkdir(parents=True, exist_ok=True)
+    overrides = overrides or {}
     
-    output_file = get_benchmark_output_file(model, output_dir)
+    tag = overrides.get("tag", "").strip()
+    output_file = get_benchmark_output_file(model, output_dir, tag)
     
     if output_file.exists():
         log(f"SKIP {model} [{backend_name}] (Result exists)")
@@ -197,13 +209,13 @@ def run_bench_set(model, backend_name, output_dir, extra_env=None):
     dataset_path = get_dataset()
     dataset_args = ["--dataset-name", "sharegpt", "--dataset-path", dataset_path] if dataset_path else ["--input-len", "1024"]
     
-    batch_tokens = MODEL_TABLE[model].get("max_tokens", DEFAULT_BATCH_TOKENS)
+    batch_tokens = str(overrides.get("max_tokens", MODEL_TABLE.get(model, {}).get("max_tokens", DEFAULT_BATCH_TOKENS)))
 
     log(f"START {model} [TP={CLUSTER_TP} | {backend_name}]...")
     
-    nuke_vllm_cache()
+    nuke_vllm_cache(HEAD_IP)
 
-    cmd = ["vllm", "bench", "throughput"] + get_model_args(model)
+    cmd = ["vllm", "bench", "throughput"] + get_model_args(model, overrides)
     cmd.extend([
         "--num-prompts", str(OFF_NUM_PROMPTS),
         "--max-num-batched-tokens", batch_tokens,
@@ -234,20 +246,24 @@ def run_bench_set(model, backend_name, output_dir, extra_env=None):
     except Exception as e:
         log(f"ERROR: System error: {e}")
 
-def run_cluster_throughput(model):
+def run_cluster_throughput(model, overrides=None):
+    overrides = overrides or {}
+    tag = overrides.get("tag", "").strip()
+    
     # 1. Default Run (Triton)
-    if get_benchmark_output_file(model, RESULTS_DIR).exists():
+    if get_benchmark_output_file(model, RESULTS_DIR, tag).exists():
         log(f"SKIP {model} [Default] (Result exists)")
     else:
         restart_cluster()
         run_bench_set(
             model, 
             "Default", 
-            RESULTS_DIR
+            RESULTS_DIR,
+            overrides=overrides
         )
     
     # 2. ROCm Attention Run
-    if get_benchmark_output_file(model, "benchmark_results_rocm").exists():
+    if get_benchmark_output_file(model, "benchmark_results_rocm", tag).exists():
         log(f"SKIP {model} [ROCm-Attn] (Result exists)")
     else:
         restart_cluster()
@@ -255,7 +271,8 @@ def run_cluster_throughput(model):
             model,
             "ROCm-Attn",
             "benchmark_results_rocm",
-            extra_env={}
+            extra_env={},
+            overrides=overrides
         )
 
 
@@ -290,10 +307,72 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VLLM Cluster Benchmark")
     parser.add_argument("--eth-only", action="store_true", help="Run benchmark using only Ethernet (disable RDMA/RoCE)")
     parser.add_argument("--debug-nccl", action="store_true", help="Enable NCCL Debug logging (INFO level for Transport tracking)")
+    parser.add_argument("--tui", action="store_true", help="Launch interactive configuration UI")
     args = parser.parse_args()
     
     FORCE_ETH = args.eth_only
     FORCE_DEBUG_NCCL = args.debug_nccl
+
+    selected_models = MODELS_TO_RUN
+    
+    if args.tui:
+        # 1. Cluster IPs Configuration
+        form_args = [
+            "--clear", "--backtitle", "AMD VLLM Cluster Configuration",
+            "--title", "Cluster Network Details",
+            "--form", "Verify Head and Worker IPs for this run:",
+            "10", "60", "2",
+            "Head Node IP:", "1", "1", HEAD_IP, "1", "20", "20", "0",
+            "Worker Node IP:", "2", "1", WORKER_IP, "2", "20", "20", "0"
+        ]
+        res = bench_utils.run_dialog(form_args)
+        if res is None:
+            subprocess.run(["clear"])
+            print("Cancelled by user.")
+            sys.exit(0)
+            
+        lines = res.splitlines()
+        if len(lines) >= 2:
+            HEAD_IP = lines[0].strip()
+            WORKER_IP = lines[1].strip()
+            os.environ["VLLM_HEAD_IP"] = HEAD_IP
+            os.environ["VLLM_WORKER_IP"] = WORKER_IP
+            
+        # 2. Network Options (ETH / Debug)
+        eth_status = "on" if FORCE_ETH else "off"
+        debug_status = "on" if FORCE_DEBUG_NCCL else "off"
+        check_args = [
+            "--title", "Network Overrides",
+            "--checklist", "Select custom backend flags:", "10", "60", "2",
+            "ETH_ONLY", "Force Ethernet (Disable RDMA/RoCE)", eth_status,
+            "DEBUG_NCCL", "Enable NCCL debug logs", debug_status
+        ]
+        flags_res = bench_utils.run_dialog(check_args)
+        if flags_res is not None:
+            FORCE_ETH = "ETH_ONLY" in flags_res
+            FORCE_DEBUG_NCCL = "DEBUG_NCCL" in flags_res
+
+        # 3. Model Selection
+        checklist_args = [
+            "--title", "Model Selection",
+            "--checklist", "Select models to benchmark:", "20", "65", "10"
+        ]
+        for m in MODELS_TO_RUN:
+            m_name = m.split("/")[-1]
+            checklist_args.extend([m, m_name, "on"])
+            
+        choice = bench_utils.run_dialog(checklist_args)
+        if choice is None:
+            subprocess.run(["clear"])
+            print("Cancelled by user.")
+            sys.exit(0)
+            
+        import shlex
+        selected_models = [m for m in shlex.split(choice)]
+        if not selected_models:
+            subprocess.run(["clear"])
+            print("No models selected. Exiting.")
+            sys.exit(0)
 
     log("Ray Cluster Detected. Starting Benchmarks (Dual Backend)...")
     if FORCE_ETH:
@@ -302,7 +381,45 @@ if __name__ == "__main__":
         log("Note: NCCL Debug mode enabled (Transport Logging).")
     log("Note: Eager Mode (--enforce-eager) is ENABLED for cluster stability.")
     
-    for m in MODELS_TO_RUN:
-        run_cluster_throughput(m)
+    for m in selected_models:
+        overrides = {}
+        if args.tui:
+            config = MODEL_TABLE.get(m, {})
+            default_seqs = config.get("max_num_seqs", "32")
+            default_tokens = config.get("max_tokens", DEFAULT_BATCH_TOKENS)
+            default_util = config.get("gpu_util", GPU_UTIL)
+            default_ctx = config.get("ctx", "auto")
+            
+            form_args = [
+                "--clear", "--backtitle", f"AMD VLLM Cluster Benchmark Configuration (TP: {CLUSTER_TP})",
+                "--title", f"Tune Parameters: {m.split('/')[-1]}",
+                "--form", "Edit cluster model options. Leave tag empty for no suffix.",
+                "15", "70", "5",
+                "Max Concurrent Seqs:", "1", "1",  str(default_seqs), "1", "25", "15", "0",
+                "Max Batched Tokens:", "2", "1", str(default_tokens), "2", "25", "15", "0",
+                "GPU Utilization (0-1):", "3", "1", str(default_util), "3", "25", "15", "0",
+                "Max Context Length:", "4", "1", str(default_ctx), "4", "25", "15", "0",
+                "Filename Tag (Optional):", "5", "1", "", "5", "25", "15", "0"
+            ]
+            
+            form_res = bench_utils.run_dialog(form_args)
+            if form_res is None:
+                subprocess.run(["clear"])
+                print(f"Skipping {m} due to user cancellation.")
+                continue
+                
+            lines = form_res.splitlines()
+            if len(lines) >= 5:
+                overrides["max_num_seqs"] = lines[0].strip()
+                overrides["max_tokens"] = lines[1].strip()
+                overrides["gpu_util"] = lines[2].strip()
+                
+                ctx_val = lines[3].strip()
+                if ctx_val and ctx_val.lower() != "auto":
+                    overrides["ctx"] = ctx_val
+                    
+                overrides["tag"] = lines[4].strip()
+
+        run_cluster_throughput(m, overrides=overrides)
         
     print_summary()
