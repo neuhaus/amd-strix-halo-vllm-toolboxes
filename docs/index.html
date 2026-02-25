@@ -473,6 +473,10 @@
                     style="font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 4px; cursor: pointer;">
                     <input type="checkbox" id="toggleTP2Eth"> TP2 (Eth)
                 </label>
+                <label
+                    style="font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                    <input type="checkbox" id="toggleTP2Usb"> TP2 (Thunderbolt)
+                </label>
             </div>
 
             <!-- Attention Group -->
@@ -549,6 +553,7 @@
             showTP1: true,
             showTP2: true,
             showTP2Eth: false,
+            showTP2Usb: false,
             showTriton: true,
             showRocm: false
         };
@@ -621,6 +626,7 @@
             $('toggleTP1').addEventListener('change', e => { state.showTP1 = e.target.checked; render(); });
             $('toggleTP2').addEventListener('change', e => { state.showTP2 = e.target.checked; render(); });
             $('toggleTP2Eth').addEventListener('change', e => { state.showTP2Eth = e.target.checked; render(); });
+            $('toggleTP2Usb').addEventListener('change', e => { state.showTP2Usb = e.target.checked; render(); });
             $('toggleTriton').addEventListener('change', e => { state.showTriton = e.target.checked; render(); });
             $('toggleRocm').addEventListener('change', e => { state.showRocm = e.target.checked; render(); });
         }
@@ -643,15 +649,21 @@
                         results: {
                             1: { triton: null, rocm: null },
                             2: { triton: null, rocm: null },
-                            "2_eth": { triton: null, rocm: null }
+                            "2_eth": { triton: null, rocm: null },
+                            "2_usb": { triton: null, rocm: null }
                         }
                     };
                 }
 
                 const m = testGroups[testName].models[modelName];
                 let tp = run.tp || 1;
-                if (tp === 2 && run.network === "Ethernet") {
-                    tp = "2_eth";
+                if (tp === 2) {
+                    if (run.network === "Ethernet") {
+                        if (run.tag === "usb") tp = "2_usb";
+                        else tp = "2_eth";
+                    } else if (run.tag === "usb") {
+                        tp = "2_usb";
+                    }
                 }
 
                 if (!m.results[tp]) m.results[tp] = { triton: null, rocm: null };
@@ -766,6 +778,10 @@
                 if (state.showTriton) cols.push({ id: "tp2_eth_triton", label: "TP2 Eth Triton" });
                 if (state.showRocm) cols.push({ id: "tp2_eth_rocm", label: "TP2 Eth ROCm" });
             }
+            if (state.showTP2Usb) {
+                if (state.showTriton) cols.push({ id: "tp2_usb_triton", label: "TP2 TB Triton" });
+                if (state.showRocm) cols.push({ id: "tp2_usb_rocm", label: "TP2 TB ROCm" });
+            }
 
             // Thead
             let theadHtml = `<thead><tr><th class="col-model">Model</th>`;
@@ -835,6 +851,8 @@
             if (colId === "tp2_rocm") return m.results[2]?.rocm;
             if (colId === "tp2_eth_triton") return m.results["2_eth"]?.triton;
             if (colId === "tp2_eth_rocm") return m.results["2_eth"]?.rocm;
+            if (colId === "tp2_usb_triton") return m.results["2_usb"]?.triton;
+            if (colId === "tp2_usb_rocm") return m.results["2_usb"]?.rocm;
             return null;
         }
 

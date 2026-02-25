@@ -213,7 +213,7 @@ def run_bench_set(model, backend_name, output_dir, extra_env=None, overrides=Non
 
     log(f"START {model} [TP={CLUSTER_TP} | {backend_name}]...")
     
-    nuke_vllm_cache(HEAD_IP)
+    nuke_vllm_cache()
 
     cmd = ["vllm", "bench", "throughput"] + get_model_args(model, overrides)
     cmd.extend([
@@ -279,29 +279,60 @@ def run_cluster_throughput(model, overrides=None):
 def print_summary():
     eth_suffix = "_eth" if FORCE_ETH else ""
     title_suffix = " (Ethernet ONLY)" if FORCE_ETH else ""
-    print(f"\n{f'MODEL (TP=2){title_suffix}':<50} | {'Triton':<8} | {'ROCm':<8}")
-    print("-" * 75)
+    print(f"\n{f'MODEL (TP={CLUSTER_TP}){title_suffix}':<50} | {'Tag':<15} | {'Triton':<8} | {'ROCm':<8}")
+    print("-" * 92)
     
     for m in MODELS_TO_RUN:
         msafe = m.replace("/", "_")
-        
-        # Default
-        try: 
-            p1 = RESULTS_DIR / f"{msafe}_cluster_tp{CLUSTER_TP}{eth_suffix}_throughput.json"
-            d1 = json.loads(p1.read_text())
-            val1 = f"{d1.get('tokens_per_second', 0):.1f}"
-        except: val1 = "N/A"
-        
-        # ROCm
-        try:
-            p2 = Path("benchmark_results_rocm") / f"{msafe}_cluster_tp{CLUSTER_TP}{eth_suffix}_throughput.json"
-            d2 = json.loads(p2.read_text())
-            val2 = f"{d2.get('tokens_per_second', 0):.1f}"
-        except: val2 = "N/A"
-
         name_cell = m.split('/')[-1]
-        print(f"{name_cell:<50} | {val1:<8} | {val2:<8}")
-    print("-" * 75)
+        
+        # Find all tags used for this model by looking at the files in RESULTS_DIR
+        prefix = f"{msafe}_cluster_tp{CLUSTER_TP}{eth_suffix}"
+        
+        # Gather all unique tags from both directories
+        tags = set()
+        for p in RESULTS_DIR.glob(f"{prefix}*_throughput.json"):
+            # Extract tag: {prefix}_{tag}_throughput.json or {prefix}_throughput.json
+            name_part = p.name[len(prefix):-len("_throughput.json")]
+            tag = name_part.lstrip("_")
+            tags.add(tag)
+            
+        for p in Path("benchmark_results_rocm").glob(f"{prefix}*_throughput.json"):
+            name_part = p.name[len(prefix):-len("_throughput.json")]
+            tag = name_part.lstrip("_")
+            tags.add(tag)
+            
+        if not tags:
+            tags.add("") # Default empty tag if no files found
+            
+        # Sort so empty tag (Default) comes first
+        for tag in sorted(list(tags)):
+            tag_suffix = f"_{tag}" if tag else ""
+            
+            # Default (Triton)
+            try: 
+                p1 = RESULTS_DIR / f"{prefix}{tag_suffix}_throughput.json"
+                if p1.exists():
+                    d1 = json.loads(p1.read_text())
+                    val1 = f"{d1.get('tokens_per_second', 0):.1f}"
+                else:
+                    val1 = "N/A"
+            except: val1 = "N/A"
+            
+            # ROCm
+            try:
+                p2 = Path("benchmark_results_rocm") / f"{prefix}{tag_suffix}_throughput.json"
+                if p2.exists():
+                    d2 = json.loads(p2.read_text())
+                    val2 = f"{d2.get('tokens_per_second', 0):.1f}"
+                else:
+                    val2 = "N/A"
+            except: val2 = "N/A"
+
+            display_tag = tag if tag else "(Default)"
+            print(f"{name_cell:<50} | {display_tag:<15} | {val1:<8} | {val2:<8}")
+            
+    print("-" * 92)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VLLM Cluster Benchmark")

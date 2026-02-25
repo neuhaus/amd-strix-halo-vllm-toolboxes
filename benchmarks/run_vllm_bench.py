@@ -179,31 +179,59 @@ def run_throughput(model, tp_size, backend_name="Default", output_dir=RESULTS_DI
 
 
 def print_summary(tps):
-    print(f"\n{'MODEL':<40} | {'TP':<2} | {'Triton':<8} | {'ROCm':<8}")
-    print("-" * 75)
+    print(f"\n{'MODEL':<40} | {'TP':<2} | {'Tag':<15} | {'Triton':<8} | {'ROCm':<8}")
+    print("-" * 92)
     
     for m in MODELS_TO_RUN:
         msafe = m.replace("/", "_")
+        name_cell = m.split('/')[-1]
+        
         for tp in tps:
             if tp not in MODEL_TABLE[m]["valid_tp"]: continue
             
-            # Default
-            try: 
-                p1 = RESULTS_DIR / f"{msafe}_tp{tp}_throughput.json"
-                d1 = json.loads(p1.read_text())
-                val1 = f"{d1.get('tokens_per_second', 0):.1f}"
-            except: val1 = "N/A"
+            prefix = f"{msafe}_tp{tp}"
             
-            # ROCm
-            try:
-                p2 = Path("benchmark_results_rocm") / f"{msafe}_tp{tp}_throughput.json"
-                d2 = json.loads(p2.read_text())
-                val2 = f"{d2.get('tokens_per_second', 0):.1f}"
-            except: val2 = "N/A"
+            tags = set()
+            for p in RESULTS_DIR.glob(f"{prefix}*_throughput.json"):
+                name_part = p.name[len(prefix):-len("_throughput.json")]
+                tag = name_part.lstrip("_")
+                tags.add(tag)
+                
+            for p in Path("benchmark_results_rocm").glob(f"{prefix}*_throughput.json"):
+                name_part = p.name[len(prefix):-len("_throughput.json")]
+                tag = name_part.lstrip("_")
+                tags.add(tag)
+                
+            if not tags:
+                tags.add("") # Default empty tag if no files found
+                
+            for tag in sorted(list(tags)):
+                tag_suffix = f"_{tag}" if tag else ""
+                
+                # Default
+                try: 
+                    p1 = RESULTS_DIR / f"{prefix}{tag_suffix}_throughput.json"
+                    if p1.exists():
+                        d1 = json.loads(p1.read_text())
+                        val1 = f"{d1.get('tokens_per_second', 0):.1f}"
+                    else:
+                        val1 = "N/A"
+                except: val1 = "N/A"
+                
+                # ROCm
+                try:
+                    p2 = Path("benchmark_results_rocm") / f"{prefix}{tag_suffix}_throughput.json"
+                    if p2.exists():
+                        d2 = json.loads(p2.read_text())
+                        val2 = f"{d2.get('tokens_per_second', 0):.1f}"
+                    else:
+                        val2 = "N/A"
+                except: val2 = "N/A"
 
-            name_cell = m.split('/')[-1]
-            print(f"{name_cell:<40} | {tp:<2} | {val1:<8} | {val2:<8}")
-    print("-" * 75)
+                display_tag = tag if tag else "(Default)"
+                print(f"{name_cell:<40} | {tp:<2} | {display_tag:<15} | {val1:<8} | {val2:<8}")
+                
+    print("-" * 92)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -68,8 +68,27 @@ def parse_logs():
             
             # Network
             network = "RoCE"
+            network_prefix = ""
             if "_eth" in rest:
                 network = "Ethernet"
+                network_prefix = "_eth"
+                
+            # Tag Extraction
+            tag = ""
+            test_type_str = ""
+            if "throughput" in fname:
+                test_type_str = "_throughput.json"
+            elif "latency" in fname:
+                qps_match = re.search(r"(_qps[\d\.]+)_latency\.json$", rest)
+                if qps_match:
+                    test_type_str = qps_match.group(0)
+                else:
+                    test_type_str = "_latency.json"
+            
+            raw_prefix = f"{tp}{network_prefix}"
+            if rest.endswith(test_type_str):
+                tag_part = rest[len(raw_prefix):-len(test_type_str)]
+                tag = tag_part.lstrip("_")
             
             # Model Name
             if "_" in model_part:
@@ -93,6 +112,7 @@ def parse_logs():
                 "name_params_b": params_b,
                 "backend": backend_name, # "Triton" or "ROCm"
                 "network": network,
+                "tag": tag,
                 "error": False
             }
 

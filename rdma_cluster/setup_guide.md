@@ -333,3 +333,61 @@ If you see link issues, ensure your Intel E810 firmware is up to date using the 
 
 *   **Reddit - Strix Halo Batching with Tensor Parallel**: [Thread by Hungry_Elk_3276](https://www.reddit.com/r/LocalLLaMA/comments/1p8nped/strix_halo_batching_with_tensor_parallel_and/)
     *   Special thanks to user **Hungry_Elk_3276** for their initial experiments with vLLM RDMA, which highlighted the missing `gfx1151` support in upstream RCCL.
+
+---
+
+## 9. Alternative: Thunderbolt Networking
+
+If you do not have dedicated 100GbE RDMA network cards, you can directly connect the two nodes using a high-quality **Thunderbolt 4 / USB4 cable**. This will create a `thunderbolt0` network interface.
+
+While it lacks the ultra-low microprocessor-level latency of RDMA, it provides significantly more bandwidth than standard 1GbE/5GbE Ethernet and is easier to configure.
+
+>**Note**: `thunderbolt-net` relies on standard OS kernel TCP/IP stacks.
+
+### 9.1 Thunderbolt Configuration
+
+**1. Establish Connection:**
+Connect the nodes directly using a certified Thunderbolt 4 or USB4 cable. Verify the link is active:
+```bash
+ip link show thunderbolt0
+```
+
+**2. Network Configuration (Head - Node 1):**
+Configure a persistent connection using `nmcli` with a static IP and Jumbo Frames (reduces CPU overhead).
+*Note: Jumbo Frames may be unsupported on some Thunderbolt host controllers.*
+```bash
+sudo nmcli connection add type ethernet ifname thunderbolt0 con-name thunderbolt0 ipv4.method manual ipv4.addresses 192.168.2.1/24 mtu 9000
+sudo nmcli connection up thunderbolt0
+```
+
+**3. Network Configuration (Worker - Node 2):**
+```bash
+sudo nmcli connection add type ethernet ifname thunderbolt0 con-name thunderbolt0 ipv4.method manual ipv4.addresses 192.168.2.2/24 mtu 9000
+sudo nmcli connection up thunderbolt0
+```
+
+**4. Firewall Rules:**
+To ensure Ray and NCCL can communicate freely over this link:
+```bash
+# Assign the interface to the trusted zone permanently
+sudo firewall-cmd --permanent --zone=trusted --add-interface=thunderbolt0
+sudo firewall-cmd --reload
+```
+
+### 9.2 Running vLLM over Thunderbolt
+
+Our cluster scripts dynamically detect the network interface based on the provided IPs. There is no need to manually export environment variables!
+
+1. Open the Toolbox: `toolbox enter vllm`
+2. Launch the cluster manager: `start-vllm-cluster`
+3. Select **Option 1 (Configure IPs)**.
+4. Set the **Head IP** explicitly to `192.168.2.1` and the **Worker IP** to `192.168.2.2`.
+5. Start the cluster normally (Option 2). The script will automatically discover and utilize `thunderbolt0` as the backend network for Ray orchestration and GPU synchronization.
+
+### 9.3 Validating the Link
+I have added Thunderbolt support to the `compare_eth_vs_rdma.sh` script. Run it from inside the toolbox to see the latency and bandwidth of your Thunderbolt link compared to your other network interfaces.
+
+You can use the `-t` flag to ONLY benchmark the Thunderbolt connection (or `-e`, `-r`, `-i` for the others):
+```bash
+/opt/compare_eth_vs_rdma.sh -t
+```
