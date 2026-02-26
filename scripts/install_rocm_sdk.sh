@@ -51,7 +51,7 @@ printf '%s\n' \
   "export VLLM_TARGET_DEVICE=rocm" \
   "export HIP_FORCE_DEV_KERNARG=1" \
   "export RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1" \
-  "export LD_PRELOAD=/usr/lib64/libtcmalloc_minimal.so.4" \
+  "export LD_PRELOAD=/usr/lib64/libtcmalloc_minimal.so.4:/opt/rocm/lib/librocm_smi64.so.1.0" \
   > /etc/profile.d/rocm-sdk.sh
 
 chmod 0644 /etc/profile.d/rocm-sdk.sh
