@@ -46,8 +46,11 @@ RUN git clone https://github.com/vllm-project/vllm.git /opt/vllm
 WORKDIR /opt/vllm
 
 # --- PATCHING ---
+# https://github.com/kyuz0/amd-strix-halo-vllm-toolboxes/issues/28
 COPY scripts/patch_strix.py /opt/vllm/patch_strix.py
+COPY scripts/fix_block_size.py /opt/vllm/fix_block_size.py
 RUN python /opt/vllm/patch_strix.py && \
+  python /opt/vllm/fix_block_size.py && \
   sed -i 's/gfx1200;gfx1201/gfx1151/' CMakeLists.txt  
 
 # 7. Build vLLM (Wheel Method) with CLANG Host Compiler
