@@ -195,7 +195,7 @@ def configure_and_launch(model_idx, gpu_count):
     
     clear_cache = False
     use_eager = config.get("enforce_eager", False) # Default to model config, usually False
-    use_rocm_attn = False # Default to Triton
+    use_rocm_attn = False # Default to Triton (ROCM_ATTN has regression on gfx1151, vllm commit 189ddefbf / #36702)
     
     name = model_id.split("/")[-1]
     
@@ -327,6 +327,8 @@ def configure_and_launch(model_idx, gpu_count):
     
     if use_rocm_attn:
         cmd.extend(["--attention-backend", "ROCM_ATTN"])
+    else:
+        cmd.extend(["--attention-backend", "TRITON_ATTN"])
         
     
     print("\n" + "="*60)

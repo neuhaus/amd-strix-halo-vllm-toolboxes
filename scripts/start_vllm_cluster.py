@@ -163,24 +163,27 @@ def configure_and_launch_vllm(model_idx, head_ip):
     # Default to eager mode for stability in cluster situations, especially at high concurrency
     use_eager = True
     trust_remote = True # Default True as per request
-    
+    use_rocm_attn = False # Default to Triton (ROCM_ATTN has regression on gfx1151, vllm commit 189ddefbf / #36702)
+
     while True:
         cache_status = "YES" if clear_cache else "NO"
         eager_status = "YES" if use_eager else "NO"
         trust_status = "YES" if trust_remote else "NO"
-        
+        attn_backend = "ROCm" if use_rocm_attn else "Triton"
+
         menu_args = [
             "--clear", "--backtitle", f"AMD VLLM CLUSTER Launcher (Head: {head_ip})",
             "--title", f"Configuration: {name}",
-            "--menu", "Customize Launch Parameters:", "22", "65", "9",
+            "--menu", "Customize Launch Parameters:", "22", "65", "10",
             "1", f"Tensor Parallelism:   {current_tp} (Fixed)",
             "2", f"Concurrent Requests:  {current_seqs}",
             "3", f"Context Length:       {current_ctx}",
             "4", f"GPU Utilization:      {current_util}",
             "5", f"Trust Remote Code:    {trust_status}",
-            "6", f"Erase vLLM Cache:     {cache_status}",
-            "7", f"Force Eager Mode:     {eager_status}",
-            "8", "LAUNCH SERVER"
+            "6", f"Attention Backend:    {attn_backend}",
+            "7", f"Erase vLLM Cache:     {cache_status}",
+            "8", f"Force Eager Mode:     {eager_status}",
+            "9", "LAUNCH SERVER"
         ]
         
         choice = run_dialog(menu_args)
@@ -231,14 +234,17 @@ def configure_and_launch_vllm(model_idx, head_ip):
              
         elif choice == "5":
             trust_remote = not trust_remote
-             
+
         elif choice == "6":
-            clear_cache = not clear_cache
-            
+            use_rocm_attn = not use_rocm_attn
+
         elif choice == "7":
-            use_eager = not use_eager
-            
+            clear_cache = not clear_cache
+
         elif choice == "8":
+            use_eager = not use_eager
+
+        elif choice == "9":
             break
             
     # Build Command
@@ -282,6 +288,11 @@ def configure_and_launch_vllm(model_idx, head_ip):
         "--distributed-executor-backend", "ray",
         "--dtype", "auto"
     ]
+
+    if use_rocm_attn:
+        cmd.extend(["--attention-backend", "ROCM_ATTN"])
+    else:
+        cmd.extend(["--attention-backend", "TRITON_ATTN"])
 
     if "Qwen3" in model_id:
         cmd.extend(["--reasoning-parser", "qwen3"])
